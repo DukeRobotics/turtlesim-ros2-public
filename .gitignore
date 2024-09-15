@@ -1,0 +1,6 @@
+.DS_Store
+__pycache__
+
+turtlesim_ws/build/*
+turtlesim_ws/install/*
+turtlesim_ws/log/*
