@@ -1,6 +1,7 @@
 # Import Python standard libraries
 import sys
 import math
+from typing import Tuple
 
 # Import ROS2 Python API
 import rclpy
@@ -9,12 +10,17 @@ from rclpy.node import Node
 # Import message definitions
 from geometry_msgs.msg import Twist
 from turtlesim.msg import Pose
+from std_srvs.srv import Empty
+from turtlesim.srv import SetPen
 
 # Turtle will stop rotating in place when its angle is within this threshold of the desired angle. Units: Radians
 ANGULAR_THRESHOLD = 0.001
 
 # Constant multiplier for angular velocity when turtle is rotating in place
-ANGULAR_GAIN = 1.0
+ANGULAR_GAIN = 4.0
+
+LINEAR_THRESHOLD = 0.001
+LINEAR_GAIN = 3.0
 
 class MoveTurtle(Node):
     def __init__(self):
@@ -26,6 +32,20 @@ class MoveTurtle(Node):
         # Initialize subscriber for turtle pose
         self.turtle_pose = None
         self.pose_subscriber = self.create_subscription(Pose, 'turtle1/pose', self.got_turtle_pose, 10)
+
+        # Initialize client for reset service
+        self.reset_client = self.create_client(Empty, 'reset')
+        while not self.reset_client.wait_for_service(timeout_sec=3.0):
+            self.get_logger().info('Reset service not available, waiting...')
+
+        # Initialize client for set pen service
+        self.set_pen_client = self.create_client(SetPen, 'turtle1/set_pen')
+        while not self.set_pen_client.wait_for_service(timeout_sec=3.0):
+            self.get_logger().info('SetPen service not available, waiting...')
+
+        # Intialize pen color and width
+        self.pen_color = (178, 184, 255)  # RGB
+        self.pen_width = 5
 
     def got_turtle_pose(self, turtle_pose: Pose):
         """
@@ -45,10 +65,25 @@ class MoveTurtle(Node):
         while self.turtle_pose is None:
             rclpy.spin_once(self)
 
+        self.reset()
+
         # Test `rotate_to_global_theta`
-        thetas = [0, math.pi/2, math.pi, -math.pi/2, 0, -math.pi/2, -math.pi, math.pi/2, 0]
-        for theta in thetas:
-            self.rotate_to_global_theta(theta)
+        # thetas = [0, math.pi/2, math.pi, -math.pi/2, 0, -math.pi/2, -math.pi, math.pi/2, 0]
+        # for theta in thetas:
+        #     self.rotate_to_global_theta(theta)
+
+        # positions = [(6, 5), (8, 4), (2, 3)]
+        # for position in positions:
+        #     self.move_to_global_pos_and_stop(*position)
+
+        # self.draw_reg_polygon(5, 2)
+        # self.draw_reg_polygon(5, 3)
+        self.pen_color = (255, 0, 0)
+        self.pen_width = 10
+        self.set_pen(*self.pen_color, self.pen_width, False)
+        self.draw_reg_polygon(4, 3)
+
+    # ---------------------- TASK PLANNING ----------------------
 
     """
     Task #1: Draw Square
@@ -62,7 +97,28 @@ class MoveTurtle(Node):
         Move to (7.5, 7.5)
         Move to (5.5, 7.5)
         """
-        pass
+        positions = [(7.5, 5.5), (7.5, 7.5), (5.5, 7.5), (5.5, 5.5)]
+        for position in positions:
+            self.move_to_global_pos_and_stop(*position)
+
+    """
+    Task #2: Draw a regular polygon
+    """
+
+    def draw_reg_polygon(self, n: int, side_length: float):
+        """
+        Draw a regular polygon with n sides and side_length, starting at the turtle's current position and orientation.
+
+        Args:
+            n (int): Number of sides in polygon.
+            side_length (float): Length of each side of the polygon.
+        """
+        for _ in range(n):
+            self.move_to_local_pos_and_stop(side_length, 0)
+            self.rotate_to_local_theta(2 * math.pi / n)
+
+
+    # ---------------------- CONTROLS ----------------------
 
     def move_to_global_pos_and_stop(self, x: float, y: float):
         """
@@ -81,8 +137,42 @@ class MoveTurtle(Node):
         1. Compute theta that turtle needs to be at to face (x, y)
         2. Rotate to computed theta
         3. Set velocity to positive linear x to move forward until turtle reaches (x, y)
+            - create a new twist object
+            - distance between turtle and desired point
+            - set twist.linear.x to distance * gain
+            - loop while rclpy.ok() and distance > threshold
+            - publish empty twist after the loop ends
+
+            X = Ax + d
+            X is global coordinate
+            x is local coodinate
+            A is 2D rotation matrix for angle theta
+            d is turtle's (x, y) coordinates
+
+            X - d = Ax
+            A^-1 (X - d) = x
+
+            A^-1 means rotate by -theta
         """
-        pass
+
+        desired_theta = math.atan2(y - self.turtle_pose.y, x - self.turtle_pose.x)
+        self.rotate_to_global_theta(desired_theta)
+
+        twist = Twist()
+
+        dist_x, _ = self.global_to_local_vector(x, y)
+
+        while rclpy.ok() and abs(dist_x) > LINEAR_THRESHOLD:
+
+            twist.linear.x = dist_x * LINEAR_GAIN
+
+            self.vel_publisher.publish(twist)
+
+            rclpy.spin_once(self)
+
+            dist_x, _ = self.global_to_local_vector(x, y)
+
+        self.vel_publisher.publish(Twist())
 
     def rotate_to_global_theta(self, theta: float):
         """
@@ -114,6 +204,56 @@ class MoveTurtle(Node):
         # Stop turtle
         self.vel_publisher.publish(Twist())
 
+    def move_to_local_pos_and_stop(self, x: float, y: float):
+        """
+        Move x units forward/backward and y units left/right relative to turtle's current pose.
+
+        Args:
+            x (float): Units to move forward/backward
+            y (float): Units to move left/right
+        """
+        global_x, global_y = self.local_to_global_vector(x, y)
+        self.move_to_global_pos_and_stop(global_x, global_y)
+
+
+    def rotate_to_local_theta(self, theta: float):
+        """
+        Rotate turtle by theta radians relative to its current orientation.
+
+        Args:
+            theta (float): Angle to rotate turtle by.
+        """
+        global_theta = self.turtle_pose.theta + theta
+        self.rotate_to_global_theta(global_theta)
+
+    def reset(self):
+        """
+        Reset the turtle's position, clear the canvas, reset pen color and width.
+        """
+        request = Empty.Request()
+        future = self.reset_client.call_async(request)
+        rclpy.spin_until_future_complete(self, future)
+
+    def set_pen(self, r: int, g: int, b: int, width: int, off: bool):
+        """
+        Set pen color and width.
+
+        Args:
+            r (int): Red value. Must be between 0 and 255.
+            g (int): Green value. Must be between 0 and 255.
+            b (int): Blue value. Must be between 0 and 255.
+            width (int): Width of line drawn by pen. Must be between 0 and 255.
+            off (bool): Wether the pen is off or on.
+        """
+        request = SetPen.Request()
+        request.r = r
+        request.g = g
+        request.b = b
+        request.width = width
+        request.off = int(off)
+        future = self.set_pen_client.call_async(request)
+        rclpy.spin_until_future_complete(self, future)
+
 
     def convert_0_2pi_to_neg_pi_pi(self, theta: float):
         """
@@ -124,6 +264,46 @@ class MoveTurtle(Node):
         """
         return (theta + math.pi) % (2 * math.pi) - math.pi
 
+
+    def global_to_local_vector(self, x: float, y: float) -> Tuple[float, float]:
+        """
+        Convert a vector in global coordinates into local coordinates.
+
+        Args:
+            x (float): X-coordinate in global frmae
+            y (float): Y-coordinate in global frame
+
+        Returns:
+            tuple (float, float): X, Y coordinates in local frame
+        """
+
+        # X - d
+        translated_x = x - self.turtle_pose.x
+        translated_y = y - self.turtle_pose.y
+
+        # A^-1 (X - d)
+        rotated_x = translated_x * math.cos(-self.turtle_pose.theta) - translated_y * math.sin(-self.turtle_pose.theta)
+        rotated_y = translated_x * math.sin(-self.turtle_pose.theta) + translated_y * math.cos(-self.turtle_pose.theta)
+
+        return rotated_x, rotated_y
+
+    def local_to_global_vector(self, x: float, y: float) -> Tuple[float, float]:
+        """
+        Convert a vector in local coordinates to global coordinates.
+
+        Args:
+            x (float): X-coordinate in local frmae
+            y (float): Y-coordinate in local frame
+
+        Returns:
+            tuple (float, float): X, Y coordinates in global frame
+        """
+
+        # X = Ax + d
+        global_x = x * math.cos(self.turtle_pose.theta) - y * math.sin(self.turtle_pose.theta) + self.turtle_pose.x
+        global_y = x * math.sin(self.turtle_pose.theta) + y * math.cos(self.turtle_pose.theta) + self.turtle_pose.y
+
+        return global_x, global_y
 
 
 def main():
