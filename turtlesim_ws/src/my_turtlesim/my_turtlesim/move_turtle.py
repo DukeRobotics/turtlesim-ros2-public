@@ -1,7 +1,7 @@
 # Import Python standard libraries
 import sys
 import math
-from typing import Tuple
+from typing import Tuple, Optional
 
 # Import ROS2 Python API
 import rclpy
@@ -19,7 +19,10 @@ ANGULAR_THRESHOLD = 0.001
 # Constant multiplier for angular velocity when turtle is rotating in place
 ANGULAR_GAIN = 4.0
 
+# Turtle will stop moving to new position when the distance to the new position is within this threshold.
 LINEAR_THRESHOLD = 0.001
+
+# Constant multiplier for linear velocity when turtle is moving to a new position
 LINEAR_GAIN = 3.0
 
 class MoveTurtle(Node):
@@ -33,10 +36,10 @@ class MoveTurtle(Node):
         self.turtle_pose = None
         self.pose_subscriber = self.create_subscription(Pose, 'turtle1/pose', self.got_turtle_pose, 10)
 
-        # Initialize client for reset service
-        self.reset_client = self.create_client(Empty, 'reset')
-        while not self.reset_client.wait_for_service(timeout_sec=3.0):
-            self.get_logger().info('Reset service not available, waiting...')
+        # Initialize client for clear service
+        self.clear_client = self.create_client(Empty, 'clear')
+        while not self.clear_client.wait_for_service(timeout_sec=3.0):
+            self.get_logger().info('Clear service not available, waiting...')
 
         # Initialize client for set pen service
         self.set_pen_client = self.create_client(SetPen, 'turtle1/set_pen')
@@ -65,19 +68,9 @@ class MoveTurtle(Node):
         while self.turtle_pose is None:
             rclpy.spin_once(self)
 
-        self.reset()
+        # Clear all drawings off canvas
+        self.clear()
 
-        # Test `rotate_to_global_theta`
-        # thetas = [0, math.pi/2, math.pi, -math.pi/2, 0, -math.pi/2, -math.pi, math.pi/2, 0]
-        # for theta in thetas:
-        #     self.rotate_to_global_theta(theta)
-
-        # positions = [(6, 5), (8, 4), (2, 3)]
-        # for position in positions:
-        #     self.move_to_global_pos_and_stop(*position)
-
-        # self.draw_reg_polygon(5, 2)
-        # self.draw_reg_polygon(5, 3)
         self.pen_color = (255, 0, 0)
         self.pen_width = 10
         self.set_pen(*self.pen_color, self.pen_width, False)
@@ -118,6 +111,15 @@ class MoveTurtle(Node):
             self.rotate_to_local_theta(2 * math.pi / n)
 
 
+    """
+    TODO: COMPLETE THIS INDEPENDENTLY
+
+    Task #3: Draw something cool
+        - Incorporate straight lines and arcs
+        - Use different pen colors or widths
+    """
+
+
     # ---------------------- CONTROLS ----------------------
 
     def move_to_global_pos_and_stop(self, x: float, y: float):
@@ -129,49 +131,31 @@ class MoveTurtle(Node):
             y (float): Y-coordinate of desired position.
         """
 
-        """
-        Need: Turtle's pose (x, y, theta)
-        Need to subscribe to /turtle1/pose (DONE)
-
-        Algorithm:
-        1. Compute theta that turtle needs to be at to face (x, y)
-        2. Rotate to computed theta
-        3. Set velocity to positive linear x to move forward until turtle reaches (x, y)
-            - create a new twist object
-            - distance between turtle and desired point
-            - set twist.linear.x to distance * gain
-            - loop while rclpy.ok() and distance > threshold
-            - publish empty twist after the loop ends
-
-            X = Ax + d
-            X is global coordinate
-            x is local coodinate
-            A is 2D rotation matrix for angle theta
-            d is turtle's (x, y) coordinates
-
-            X - d = Ax
-            A^-1 (X - d) = x
-
-            A^-1 means rotate by -theta
-        """
-
+        # Rotate turtle to face goal
         desired_theta = math.atan2(y - self.turtle_pose.y, x - self.turtle_pose.x)
         self.rotate_to_global_theta(desired_theta)
 
         twist = Twist()
 
+        # Compute distance to goal
         dist_x, _ = self.global_to_local_vector(x, y)
 
+        # Loop while turtle isn't within a threshold of the goal
         while rclpy.ok() and abs(dist_x) > LINEAR_THRESHOLD:
 
+            # Update linear velocity to be proportional to distance to goal
             twist.linear.x = dist_x * LINEAR_GAIN
 
+            # Publish velocity
             self.vel_publisher.publish(twist)
 
+            # Allow ROS to process published message
             rclpy.spin_once(self)
 
+            # Update distance to goal
             dist_x, _ = self.global_to_local_vector(x, y)
 
+        # Stop turtle
         self.vel_publisher.publish(Twist())
 
     def rotate_to_global_theta(self, theta: float):
@@ -226,12 +210,40 @@ class MoveTurtle(Node):
         global_theta = self.turtle_pose.theta + theta
         self.rotate_to_global_theta(global_theta)
 
-    def reset(self):
+
+    # TODO: COMPLETE THIS INDEPENDENTLY
+    def draw_arc(self, center_x: float, center_y: float, radius: float, start_theta: float, end_theta: float):
         """
-        Reset the turtle's position, clear the canvas, reset pen color and width.
+        Draw an arc (part of a circle) with the given center, radius, and start and end angles.
+
+        Angles are defined in radians, with 0 radians corresponding to the global positive x-axis and increasing in the counterclockwise direction.
+
+        Args:
+            center_x (float): X-coordinate of center of circle containing the arc.
+            center_y (float): Y-coordinate of center of circle containing the arc.
+            radius (float): Radius of circle containing arc.
+            start_theta (float): Staring angle of arc. Must be between 0 and 2pi.
+            end_theta (float): Ending angle of arc. Must be between 0 and 2pi.
+        """
+
+        """
+        Hints:
+            1. Structed similarly to move_to_global_pos_and_stop and rotate_to_global_theta
+            2. v = omega * r
+                v = linear velocity
+                omega = angular velocity
+                r = radius
+            3. Tune your gain to draw the arc as fast as possible without overshooting.
+        """
+        pass
+
+
+    def clear(self):
+        """
+        Clear the canvas.
         """
         request = Empty.Request()
-        future = self.reset_client.call_async(request)
+        future = self.clear_client.call_async(request)
         rclpy.spin_until_future_complete(self, future)
 
     def set_pen(self, r: int, g: int, b: int, width: int, off: bool):
@@ -254,6 +266,32 @@ class MoveTurtle(Node):
         future = self.set_pen_client.call_async(request)
         rclpy.spin_until_future_complete(self, future)
 
+    def set_pen_off(self):
+        """
+        Set pen off so turtle doesn't draw when it moves.
+        """
+        self.set_pen(0, 0, 0, 0, True)
+
+    def set_pen_on(self):
+        """
+        Set pen on. Update the color and width to self.pen_color and self.pen_width.
+        """
+        self.set_pen(*self.pen_color, self.pen_width, False)
+
+    def relocate_turtle(self, x: float, y: float, theta: Optional[float] = None):
+        """
+        Move turtle to a new position and orientation with the pen off. Turn pen back on after relocation.
+
+        Args:
+            x (float): X-coordinate of new position.
+            y (float): Y-coordinate of new position.
+            theta (Optional[float]): Orientation of turtle at the new position. Defaults to None, in which case orientation is not changed.
+        """
+        self.set_pen_off()
+        self.move_to_global_pos_and_stop(x, y)
+        if theta is not None:
+            self.rotate_to_global_theta(theta)
+        self.set_pen_on()
 
     def convert_0_2pi_to_neg_pi_pi(self, theta: float):
         """
